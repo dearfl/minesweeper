@@ -1,0 +1,11 @@
+[package]
+name = "minesweeper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.16.0", features = ["wayland"] }
+bevy-inspector-egui = { version = "0.31.0", optional = true }
+
+[features]
+debug = ["dep:bevy-inspector-egui"]
