@@ -171,51 +171,48 @@ impl InterationParam<'_, '_> {
         }
     }
 
-    fn uncover(&mut self, target: Entity) -> bool {
+    fn uncover(&mut self, target: Entity) {
         let Ok((adjacents, cnt_bombs, cnt_flagged)) = self.count_adjacents(target) else {
-            return false;
+            return;
         };
-        let Ok(mut ent) = self.query.get_mut(target) else {
-            return false;
+        let Ok(ent) = self.query.get(target) else {
+            return;
         };
         if ent.flagged.is_some() {
             // don't touch the flagged cells
-            return false;
+            return;
         }
         match ent.covered.is_some() {
-            true => match ent.cell.is_bomb {
-                true => {
-                    // uncover a bomb, Game Over
-                    ent.material.0 = self.materials.bomb.clone();
-                    return true;
-                }
-                false => {
-                    // Not Game Over, Remove Covered Component
-                    // note we don't actually change the material here
-                    // we change material when spreading
-                    self.command.entity(target).remove::<Covered>();
-                }
-            },
-            false if cnt_flagged == cnt_bombs => {
-                // the cell is already been uncovered, but player have flagged enough
-                // adjacent cells to uncover the remainings
-                for ent in adjacents {
-                    self.command.entity(ent).remove::<Covered>();
+            true => {
+                // uncover a covered cell, we don't care if target is bomb here
+                //  instead we check in on_uncover system
+                self.command.entity(target).remove::<Covered>();
+            }
+            false => {
+                if cnt_flagged >= cnt_bombs {
+                    // the cell has already been uncovered, but player have flagged enough
+                    // adjacent cells to uncover the remainings
+                    for ent in adjacents {
+                        self.command.entity(ent).remove::<Covered>();
+                    }
                 }
             }
-            _ => {}
         }
-        false
     }
 
-    fn spread(&mut self, target: Entity) {
+    fn on_uncover(&mut self, target: Entity) -> bool {
         let Ok((adjacents, cnt_bombs, _)) = self.count_adjacents(target) else {
-            return;
+            return false;
         };
 
         let Ok(mut ent) = self.query.get_mut(target) else {
-            return;
+            return false;
         };
+        if ent.cell.is_bomb {
+            // uncover a bomb, Game Over
+            ent.material.0 = self.materials.bomb.clone();
+            return true;
+        }
         // change the material depending on bomb count
         ent.material.0 = self.materials.count[cnt_bombs].clone();
         if cnt_bombs == 0 {
@@ -224,6 +221,7 @@ impl InterationParam<'_, '_> {
                 self.command.entity(ent).remove::<Covered>();
             }
         }
+        false
     }
 }
 
@@ -311,16 +309,12 @@ fn unhover(
     }
 }
 
-fn interact(
-    click: Trigger<Pointer<Click>>,
-    mut interation: InterationParam,
-    mut startover: EventWriter<StartOver>,
-) {
+fn interact(click: Trigger<Pointer<Click>>, mut interation: InterationParam) {
     let target = click.target();
     match click.button {
         // left button means uncover
-        PointerButton::Primary if interation.uncover(target) => {
-            startover.write(StartOver);
+        PointerButton::Primary => {
+            interation.uncover(target);
         }
         // right button means toggle flag
         PointerButton::Secondary => {
@@ -330,9 +324,15 @@ fn interact(
     }
 }
 
-fn spread(trigger: Trigger<OnRemove, Covered>, mut interation: InterationParam) {
+fn spread(
+    trigger: Trigger<OnRemove, Covered>,
+    mut interation: InterationParam,
+    mut startover: EventWriter<StartOver>,
+) {
     let target = trigger.target();
-    interation.spread(target);
+    if interation.on_uncover(target) {
+        startover.write(StartOver);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
