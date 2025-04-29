@@ -242,8 +242,11 @@ fn setup(mut command: Commands, mut events: EventWriter<StartOver>) {
 }
 
 fn success(query: Query<&Cell, With<Covered>>, mut startover: EventWriter<StartOver>) {
-    if query.iter().all(|grid| grid.is_bomb) {
-        // if all covered cells are bombs, then the player have win
+    let count = query.iter().count();
+    let success = query.iter().all(|grid| grid.is_bomb);
+    if count > 0 && success {
+        // sometimes this system may query no cell at all, so we check if count is correct
+        // if all covered cells are bombs, then the player have won
         startover.write(StartOver);
     }
 }
@@ -255,36 +258,38 @@ fn startover(
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<Materials>,
 ) {
+    if events.read().count() == 0 {
+        return;
+    }
     let mesh = meshes.add(Rectangle::from_length(UNIT));
     let material = materials.covered.clone();
-    for _ in events.read() {
-        // despawn any existing cells
-        for entity in &query {
-            command.entity(entity).despawn();
-        }
-        // generate a new board
-        let board = Board::new(X, Y, BOMBS);
-        board.iter().for_each(|grid| {
-            let x = (grid.x - board.columns / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
-            let y = (grid.y - board.rows / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
-            command
-                .spawn((
-                    #[cfg(feature = "debug")]
-                    Name::new("Cell"),
-                    grid,
-                    Covered,
-                    Transform::from_xyz(x, y, 0.0),
-                    Visibility::Visible,
-                    Mesh2d(mesh.clone()),
-                    MeshMaterial2d(material.clone()),
-                    Pickable::default(),
-                ))
-                .observe(hovered)
-                .observe(unhover)
-                .observe(interact)
-                .observe(spread);
-        });
+    // despawn any existing cells
+    // this WILL trigger Trigger<OnRemove, Covered>
+    for entity in &query {
+        command.entity(entity).despawn();
     }
+    // generate a new board
+    let board = Board::new(X, Y, BOMBS);
+    board.iter().for_each(|grid| {
+        let x = (grid.x - board.columns / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
+        let y = (grid.y - board.rows / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
+        command
+            .spawn((
+                #[cfg(feature = "debug")]
+                Name::new("Cell"),
+                grid,
+                Covered,
+                Transform::from_xyz(x, y, 0.0),
+                Visibility::Visible,
+                Mesh2d(mesh.clone()),
+                MeshMaterial2d(material.clone()),
+                Pickable::default(),
+            ))
+            .observe(hovered)
+            .observe(unhover)
+            .observe(interact)
+            .observe(on_uncover);
+    });
 }
 
 fn hovered(
@@ -324,7 +329,7 @@ fn interact(click: Trigger<Pointer<Click>>, mut interation: InterationParam) {
     }
 }
 
-fn spread(
+fn on_uncover(
     trigger: Trigger<OnRemove, Covered>,
     mut interation: InterationParam,
     mut startover: EventWriter<StartOver>,
