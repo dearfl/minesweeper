@@ -5,6 +5,7 @@ use bevy::{
     },
     core_pipeline::bloom::Bloom,
     ecs::{query::QueryData, system::SystemParam},
+    input::common_conditions::input_just_released,
     prelude::*,
 };
 use rand::seq::SliceRandom;
@@ -56,15 +57,20 @@ impl FromWorld for Materials {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, States, PartialEq, Eq, Hash)]
+pub enum GameState {
+    #[default]
+    Prepare,
+    Running,
+    Over,
+}
+
 // a covered cell can be uncovered or flagged
 #[derive(Clone, Copy, Debug, Component)]
 pub struct Covered;
 
 #[derive(Clone, Copy, Debug, Component)]
 pub struct Flagged;
-
-#[derive(Clone, Copy, Debug, Event)]
-pub struct StartOver;
 
 #[derive(Clone, Copy, Debug, Component)]
 #[require(Transform, Visibility)]
@@ -171,51 +177,48 @@ impl InterationParam<'_, '_> {
         }
     }
 
-    fn uncover(&mut self, target: Entity) -> bool {
+    fn uncover(&mut self, target: Entity) {
         let Ok((adjacents, cnt_bombs, cnt_flagged)) = self.count_adjacents(target) else {
-            return false;
+            return;
         };
-        let Ok(mut ent) = self.query.get_mut(target) else {
-            return false;
+        let Ok(ent) = self.query.get(target) else {
+            return;
         };
         if ent.flagged.is_some() {
             // don't touch the flagged cells
-            return false;
+            return;
         }
         match ent.covered.is_some() {
-            true => match ent.cell.is_bomb {
-                true => {
-                    // uncover a bomb, Game Over
-                    ent.material.0 = self.materials.bomb.clone();
-                    return true;
-                }
-                false => {
-                    // Not Game Over, Remove Covered Component
-                    // note we don't actually change the material here
-                    // we change material when spreading
-                    self.command.entity(target).remove::<Covered>();
-                }
-            },
-            false if cnt_flagged == cnt_bombs => {
-                // the cell is already been uncovered, but player have flagged enough
-                // adjacent cells to uncover the remainings
-                for ent in adjacents {
-                    self.command.entity(ent).remove::<Covered>();
+            true => {
+                // uncover a covered cell, we don't care if target is bomb here
+                //  instead we check in on_uncover system
+                self.command.entity(target).remove::<Covered>();
+            }
+            false => {
+                if cnt_flagged >= cnt_bombs {
+                    // the cell has already been uncovered, but player have flagged enough
+                    // adjacent cells to uncover the remainings
+                    for ent in adjacents {
+                        self.command.entity(ent).remove::<Covered>();
+                    }
                 }
             }
-            _ => {}
         }
-        false
     }
 
-    fn spread(&mut self, target: Entity) {
+    fn on_uncover(&mut self, target: Entity) -> bool {
         let Ok((adjacents, cnt_bombs, _)) = self.count_adjacents(target) else {
-            return;
+            return false;
         };
 
         let Ok(mut ent) = self.query.get_mut(target) else {
-            return;
+            return false;
         };
+        if ent.cell.is_bomb {
+            // uncover a bomb, Game Over
+            ent.material.0 = self.materials.bomb.clone();
+            return true;
+        }
         // change the material depending on bomb count
         ent.material.0 = self.materials.count[cnt_bombs].clone();
         if cnt_bombs == 0 {
@@ -224,10 +227,11 @@ impl InterationParam<'_, '_> {
                 self.command.entity(ent).remove::<Covered>();
             }
         }
+        false
     }
 }
 
-fn setup(mut command: Commands, mut events: EventWriter<StartOver>) {
+fn setup(mut command: Commands, mut state: ResMut<NextState<GameState>>) {
     command.spawn((
         Camera2d,
         IsDefaultUiCamera,
@@ -239,53 +243,57 @@ fn setup(mut command: Commands, mut events: EventWriter<StartOver>) {
         Bloom::NATURAL,
     ));
 
-    // we give a start over signal to generate a new board
-    events.write(StartOver);
+    state.set(GameState::Running);
 }
 
-fn success(query: Query<&Cell, With<Covered>>, mut startover: EventWriter<StartOver>) {
-    if query.iter().all(|grid| grid.is_bomb) {
-        // if all covered cells are bombs, then the player have win
-        startover.write(StartOver);
+fn success(query: Query<&Cell, With<Covered>>, mut state: ResMut<NextState<GameState>>) {
+    let count = query.iter().count();
+    let success = query.iter().all(|grid| grid.is_bomb);
+    if count > 0 && success {
+        // sometimes this system may query no cell at all, so we check if count is correct
+        // if all covered cells are bombs, then the player have won
+        state.set(GameState::Over);
     }
 }
 
-fn startover(
-    mut events: EventReader<StartOver>,
-    mut command: Commands,
-    query: Query<Entity, With<Cell>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    materials: Res<Materials>,
-) {
+fn restart(mut state: ResMut<NextState<GameState>>) {
+    state.set(GameState::Running);
+}
+
+fn start(mut command: Commands, mut meshes: ResMut<Assets<Mesh>>, materials: Res<Materials>) {
     let mesh = meshes.add(Rectangle::from_length(UNIT));
     let material = materials.covered.clone();
-    for _ in events.read() {
-        // despawn any existing cells
-        for entity in &query {
-            command.entity(entity).despawn();
-        }
-        // generate a new board
-        let board = Board::new(X, Y, BOMBS);
-        board.iter().for_each(|grid| {
-            let x = (grid.x - board.columns / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
-            let y = (grid.y - board.rows / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
-            command
-                .spawn((
-                    #[cfg(feature = "debug")]
-                    Name::new("Cell"),
-                    grid,
-                    Covered,
-                    Transform::from_xyz(x, y, 0.0),
-                    Visibility::Visible,
-                    Mesh2d(mesh.clone()),
-                    MeshMaterial2d(material.clone()),
-                    Pickable::default(),
-                ))
-                .observe(hovered)
-                .observe(unhover)
-                .observe(interact)
-                .observe(spread);
-        });
+    // despawn any existing cells
+    // this WILL trigger Trigger<OnRemove, Covered>
+    // generate a new board
+    let board = Board::new(X, Y, BOMBS);
+    board.iter().for_each(|grid| {
+        let x = (grid.x - board.columns / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
+        let y = (grid.y - board.rows / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
+        command
+            .spawn((
+                #[cfg(feature = "debug")]
+                Name::new("Cell"),
+                grid,
+                Covered,
+                Transform::from_xyz(x, y, 0.0),
+                Visibility::Visible,
+                Mesh2d(mesh.clone()),
+                MeshMaterial2d(material.clone()),
+                Pickable::default(),
+            ))
+            .observe(hovered)
+            .observe(unhover)
+            .observe(interact)
+            .observe(on_uncover);
+    });
+}
+
+fn cleanup(mut command: Commands, query: Query<Entity, With<Cell>>) {
+    // despawn any existing cells
+    // this WILL trigger Trigger<OnRemove, Covered>
+    for entity in &query {
+        command.entity(entity).despawn();
     }
 }
 
@@ -311,16 +319,12 @@ fn unhover(
     }
 }
 
-fn interact(
-    click: Trigger<Pointer<Click>>,
-    mut interation: InterationParam,
-    mut startover: EventWriter<StartOver>,
-) {
+fn interact(click: Trigger<Pointer<Click>>, mut interation: InterationParam) {
     let target = click.target();
     match click.button {
         // left button means uncover
-        PointerButton::Primary if interation.uncover(target) => {
-            startover.write(StartOver);
+        PointerButton::Primary => {
+            interation.uncover(target);
         }
         // right button means toggle flag
         PointerButton::Secondary => {
@@ -330,9 +334,15 @@ fn interact(
     }
 }
 
-fn spread(trigger: Trigger<OnRemove, Covered>, mut interation: InterationParam) {
+fn on_uncover(
+    trigger: Trigger<OnRemove, Covered>,
+    mut interation: InterationParam,
+    mut state: ResMut<NextState<GameState>>,
+) {
     let target = trigger.target();
-    interation.spread(target);
+    if interation.on_uncover(target) {
+        state.set(GameState::Over);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -340,10 +350,18 @@ pub struct MineSweeper;
 
 impl Plugin for MineSweeper {
     fn build(&self, app: &mut App) {
-        app.add_event::<StartOver>()
-            .add_plugins(MeshPickingPlugin)
+        app.add_plugins(MeshPickingPlugin)
             .init_resource::<Materials>()
+            .init_state::<GameState>()
             .add_systems(Startup, setup)
-            .add_systems(FixedUpdate, (success, startover));
+            .add_systems(FixedUpdate, success.run_if(in_state(GameState::Running)))
+            .add_systems(OnEnter(GameState::Running), start)
+            .add_systems(
+                Update,
+                restart
+                    .run_if(in_state(GameState::Over))
+                    .run_if(input_just_released(KeyCode::Space)),
+            )
+            .add_systems(OnEnter(GameState::Over), cleanup);
     }
 }
