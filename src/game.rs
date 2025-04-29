@@ -11,7 +11,7 @@ use rand::seq::SliceRandom;
 
 const X: i32 = 30;
 const Y: i32 = 16;
-const COUNT: i32 = 70;
+const BOMBS: i32 = 70;
 const UNIT: f32 = 48.0;
 const GAP: f32 = 2.0;
 const PADDING: f32 = 24.0;
@@ -83,23 +83,23 @@ pub struct Board {
 }
 
 impl Board {
-    pub fn new(x: i32, y: i32, count: i32) -> Self {
+    pub fn new(columns: i32, rows: i32, bombs: i32) -> Self {
         let mut rng = rand::rng();
-        let mut grids: Vec<bool> = (0..(x * y)).map(|idx| idx < count).collect();
+        let mut grids: Vec<bool> = (0..(columns * rows)).map(|idx| idx < bombs).collect();
         grids.shuffle(&mut rng);
         let grids = grids
             .iter()
             .enumerate()
-            .map(|(idx, &bomb)| Cell {
-                x: idx as i32 % x,
-                y: idx as i32 / x,
-                is_bomb: bomb,
+            .map(|(idx, &is_bomb)| Cell {
+                x: idx as i32 % columns,
+                y: idx as i32 / columns,
+                is_bomb,
             })
             .collect();
         Self {
-            columns: x,
-            rows: y,
-            _bombs: count,
+            columns,
+            rows,
+            _bombs: bombs,
             grids,
         }
     }
@@ -127,7 +127,7 @@ pub struct InterationParam<'w, 's> {
 }
 
 impl InterationParam<'_, '_> {
-    fn count_adjacents(&self, target: Entity) -> Result<(Vec<Entity>, i32, i32)> {
+    fn count_adjacents(&self, target: Entity) -> Result<(Vec<Entity>, usize, usize)> {
         let target = self.query.get(target)?;
         let adjacents = self.query.iter().filter(|ent| {
             // keep only the adjacent ones
@@ -137,11 +137,11 @@ impl InterationParam<'_, '_> {
                 && ent.cell.y <= target.cell.y + 1
                 && !(ent.cell.x == target.cell.x && ent.cell.y == target.cell.y)
         });
-        let cnt_bombs = adjacents.clone().filter(|ent| ent.cell.is_bomb).count() as i32;
+        let cnt_bombs = adjacents.clone().filter(|ent| ent.cell.is_bomb).count();
         let cnt_flagged = adjacents
             .clone()
             .filter(|ent| ent.flagged.is_some())
-            .count() as i32;
+            .count();
         let adjacents: Vec<_> = adjacents
             // filter out flagged or uncovered cells
             .filter(|ent| ent.flagged.is_none() && ent.covered.is_some())
@@ -217,7 +217,7 @@ impl InterationParam<'_, '_> {
             return;
         };
         // change the material depending on bomb count
-        ent.material.0 = self.materials.count[cnt_bombs as usize].clone();
+        ent.material.0 = self.materials.count[cnt_bombs].clone();
         if cnt_bombs == 0 {
             // if there are no bomb in adjacent cells, recursively uncover them
             for ent in adjacents {
@@ -265,7 +265,7 @@ fn startover(
             command.entity(entity).despawn();
         }
         // generate a new board
-        let board = Board::new(X, Y, COUNT);
+        let board = Board::new(X, Y, BOMBS);
         board.iter().for_each(|grid| {
             let x = (grid.x - board.columns / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
             let y = (grid.y - board.rows / 2) as f32 * (UNIT + GAP) + UNIT / 2.0;
