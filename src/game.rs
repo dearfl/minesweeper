@@ -5,6 +5,7 @@ use bevy::{
     },
     core_pipeline::bloom::Bloom,
     ecs::{query::QueryData, system::SystemParam},
+    input::common_conditions::input_just_released,
     prelude::*,
 };
 use rand::seq::SliceRandom;
@@ -56,15 +57,20 @@ impl FromWorld for Materials {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, States, PartialEq, Eq, Hash)]
+pub enum GameState {
+    #[default]
+    Prepare,
+    Running,
+    Over,
+}
+
 // a covered cell can be uncovered or flagged
 #[derive(Clone, Copy, Debug, Component)]
 pub struct Covered;
 
 #[derive(Clone, Copy, Debug, Component)]
 pub struct Flagged;
-
-#[derive(Clone, Copy, Debug, Event)]
-pub struct StartOver;
 
 #[derive(Clone, Copy, Debug, Component)]
 #[require(Transform, Visibility)]
@@ -225,7 +231,7 @@ impl InterationParam<'_, '_> {
     }
 }
 
-fn setup(mut command: Commands, mut events: EventWriter<StartOver>) {
+fn setup(mut command: Commands, mut state: ResMut<NextState<GameState>>) {
     command.spawn((
         Camera2d,
         IsDefaultUiCamera,
@@ -237,37 +243,28 @@ fn setup(mut command: Commands, mut events: EventWriter<StartOver>) {
         Bloom::NATURAL,
     ));
 
-    // we give a start over signal to generate a new board
-    events.write(StartOver);
+    state.set(GameState::Running);
 }
 
-fn success(query: Query<&Cell, With<Covered>>, mut startover: EventWriter<StartOver>) {
+fn success(query: Query<&Cell, With<Covered>>, mut state: ResMut<NextState<GameState>>) {
     let count = query.iter().count();
     let success = query.iter().all(|grid| grid.is_bomb);
     if count > 0 && success {
         // sometimes this system may query no cell at all, so we check if count is correct
         // if all covered cells are bombs, then the player have won
-        startover.write(StartOver);
+        state.set(GameState::Over);
     }
 }
 
-fn startover(
-    mut events: EventReader<StartOver>,
-    mut command: Commands,
-    query: Query<Entity, With<Cell>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    materials: Res<Materials>,
-) {
-    if events.read().count() == 0 {
-        return;
-    }
+fn restart(mut state: ResMut<NextState<GameState>>) {
+    state.set(GameState::Running);
+}
+
+fn start(mut command: Commands, mut meshes: ResMut<Assets<Mesh>>, materials: Res<Materials>) {
     let mesh = meshes.add(Rectangle::from_length(UNIT));
     let material = materials.covered.clone();
     // despawn any existing cells
     // this WILL trigger Trigger<OnRemove, Covered>
-    for entity in &query {
-        command.entity(entity).despawn();
-    }
     // generate a new board
     let board = Board::new(X, Y, BOMBS);
     board.iter().for_each(|grid| {
@@ -290,6 +287,14 @@ fn startover(
             .observe(interact)
             .observe(on_uncover);
     });
+}
+
+fn cleanup(mut command: Commands, query: Query<Entity, With<Cell>>) {
+    // despawn any existing cells
+    // this WILL trigger Trigger<OnRemove, Covered>
+    for entity in &query {
+        command.entity(entity).despawn();
+    }
 }
 
 fn hovered(
@@ -332,11 +337,11 @@ fn interact(click: Trigger<Pointer<Click>>, mut interation: InterationParam) {
 fn on_uncover(
     trigger: Trigger<OnRemove, Covered>,
     mut interation: InterationParam,
-    mut startover: EventWriter<StartOver>,
+    mut state: ResMut<NextState<GameState>>,
 ) {
     let target = trigger.target();
     if interation.on_uncover(target) {
-        startover.write(StartOver);
+        state.set(GameState::Over);
     }
 }
 
@@ -345,10 +350,18 @@ pub struct MineSweeper;
 
 impl Plugin for MineSweeper {
     fn build(&self, app: &mut App) {
-        app.add_event::<StartOver>()
-            .add_plugins(MeshPickingPlugin)
+        app.add_plugins(MeshPickingPlugin)
             .init_resource::<Materials>()
+            .init_state::<GameState>()
             .add_systems(Startup, setup)
-            .add_systems(FixedUpdate, (success, startover));
+            .add_systems(FixedUpdate, success.run_if(in_state(GameState::Running)))
+            .add_systems(OnEnter(GameState::Running), start)
+            .add_systems(
+                Update,
+                restart
+                    .run_if(in_state(GameState::Over))
+                    .run_if(input_just_released(KeyCode::Space)),
+            )
+            .add_systems(OnEnter(GameState::Over), cleanup);
     }
 }
