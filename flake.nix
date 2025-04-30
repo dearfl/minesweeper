@@ -2,21 +2,18 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     utils.url = "github:numtide/flake-utils";
-    naersk.url = "github:nix-community/naersk/master";
   };
 
   outputs =
     {
       nixpkgs,
       utils,
-      naersk,
       ...
     }:
     utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-        naersk' = pkgs.callPackage naersk { };
         deps = with pkgs; [
           pkg-config
           udev
@@ -31,13 +28,6 @@
         ];
       in
       {
-        packages.default = naersk'.buildPackage {
-          src = ./.;
-          buildInputs = deps;
-          # xkbcommon use dlopen to load, so we need to add this to runtime dependencies manualy
-          runtimeDependencies = [ "libxkbcommon.so.0" ];
-        };
-
         devShell =
           with pkgs;
           mkShell rec {
