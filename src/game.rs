@@ -65,6 +65,12 @@ pub enum GameState {
     Over,
 }
 
+impl GameState {
+    pub fn is_running(&self) -> bool {
+        matches!(self, GameState::Running)
+    }
+}
+
 // a covered cell can be uncovered or flagged
 #[derive(Clone, Copy, Debug, Component)]
 pub struct Covered;
@@ -252,19 +258,23 @@ fn success(query: Query<&Cell, With<Covered>>, mut state: ResMut<NextState<GameS
     if count > 0 && success {
         // sometimes this system may query no cell at all, so we check if count is correct
         // if all covered cells are bombs, then the player have won
+        // I don't care enough to separate win & lose
         state.set(GameState::Over);
     }
 }
 
 fn restart(mut state: ResMut<NextState<GameState>>) {
-    state.set(GameState::Running);
+    state.set(GameState::Prepare);
 }
 
-fn start(mut command: Commands, mut meshes: ResMut<Assets<Mesh>>, materials: Res<Materials>) {
+fn prepare(
+    mut command: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<Materials>,
+    mut state: ResMut<NextState<GameState>>,
+) {
     let mesh = meshes.add(Rectangle::from_length(UNIT));
     let material = materials.covered.clone();
-    // despawn any existing cells
-    // this WILL trigger Trigger<OnRemove, Covered>
     // generate a new board
     let board = Board::new(X, Y, BOMBS);
     board.iter().for_each(|grid| {
@@ -287,6 +297,9 @@ fn start(mut command: Commands, mut meshes: ResMut<Assets<Mesh>>, materials: Res
             .observe(interact)
             .observe(on_uncover);
     });
+
+    // set next state as running, is there order any problem?
+    state.set(GameState::Running);
 }
 
 fn cleanup(mut command: Commands, query: Query<Entity, With<Cell>>) {
@@ -302,7 +315,12 @@ fn hovered(
     // we only activate hover effects on covered cells
     mut query: Query<&mut MeshMaterial2d<ColorMaterial>, (With<Covered>, Without<Flagged>)>,
     materials: Res<Materials>,
+    state: Res<State<GameState>>,
 ) {
+    if !state.is_running() {
+        // we only handle hover event when the game is `running`
+        return;
+    }
     if let Ok(mut material) = query.get_mut(over.target()) {
         material.0 = materials.hovered.clone();
     }
@@ -313,13 +331,26 @@ fn unhover(
     // we only activate hover effects on covered cells
     mut query: Query<&mut MeshMaterial2d<ColorMaterial>, (With<Covered>, Without<Flagged>)>,
     materials: Res<Materials>,
+    state: Res<State<GameState>>,
 ) {
+    if !state.is_running() {
+        // we only handle hover event when the game is `running`
+        return;
+    }
     if let Ok(mut material) = query.get_mut(out.target()) {
         material.0 = materials.covered.clone();
     }
 }
 
-fn interact(click: Trigger<Pointer<Click>>, mut interation: InterationParam) {
+fn interact(
+    click: Trigger<Pointer<Click>>,
+    mut interation: InterationParam,
+    state: Res<State<GameState>>,
+) {
+    if !state.is_running() {
+        // disable uncover or flag when not running
+        return;
+    }
     let target = click.target();
     match click.button {
         // left button means uncover
@@ -337,11 +368,21 @@ fn interact(click: Trigger<Pointer<Click>>, mut interation: InterationParam) {
 fn on_uncover(
     trigger: Trigger<OnRemove, Covered>,
     mut interation: InterationParam,
-    mut state: ResMut<NextState<GameState>>,
+    state: Res<State<GameState>>,
+    mut next: ResMut<NextState<GameState>>,
 ) {
     let target = trigger.target();
-    if interation.on_uncover(target) {
-        state.set(GameState::Over);
+    if interation.on_uncover(target) && state.is_running() {
+        // only set if we are not already GameState::Over
+        next.set(GameState::Over);
+    }
+}
+
+fn reveal_bombs(mut command: Commands, query: Query<(Entity, &Cell), With<Covered>>) {
+    for (entity, cell) in &query {
+        if cell.is_bomb {
+            command.entity(entity).remove::<Covered>();
+        }
     }
 }
 
@@ -355,13 +396,14 @@ impl Plugin for MineSweeper {
             .init_state::<GameState>()
             .add_systems(Startup, setup)
             .add_systems(FixedUpdate, success.run_if(in_state(GameState::Running)))
-            .add_systems(OnEnter(GameState::Running), start)
+            .add_systems(OnEnter(GameState::Prepare), prepare)
             .add_systems(
                 Update,
                 restart
                     .run_if(in_state(GameState::Over))
                     .run_if(input_just_released(KeyCode::Space)),
             )
-            .add_systems(OnEnter(GameState::Over), cleanup);
+            .add_systems(OnEnter(GameState::Over), reveal_bombs)
+            .add_systems(OnExit(GameState::Over), cleanup);
     }
 }
