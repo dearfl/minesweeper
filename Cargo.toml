@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 bevy = { version = "0.16.1", features = ["wayland"] }
 bevy-inspector-egui = { version = "0.32.0", optional = true }
-rand = "0.9.1"
+rand = "0.9.2"
 
 [features]
 debug = ["dep:bevy-inspector-egui"]
